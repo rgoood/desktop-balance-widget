@@ -60,6 +60,9 @@ namespace DesktopWidget
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string? cls, string? title);
 
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetParent(IntPtr hWnd);
+
         private const uint WM_SPAWN_WORKERW = 0x052C;
 
         public MainWindow()
@@ -358,23 +361,26 @@ namespace DesktopWidget
                 var progman = FindWindow("Progman", null);
                 SendMessageTimeout(progman, WM_SPAWN_WORKERW, IntPtr.Zero, IntPtr.Zero, 0x0002, 1000, out _);
 
-                IntPtr defViewHost = IntPtr.Zero, wallpaper = IntPtr.Zero;
+                // 兼容两种桌面结构：
+                // 1) SHELLDLL_DefView 在某个 WorkerW 下 → 目标是它后面的下一个 WorkerW
+                // 2) SHELLDLL_DefView 直接在 Progman 下 → 目标是 Z 序中 Progman 之后的第一个 WorkerW
+                IntPtr wallpaper = IntPtr.Zero;
                 EnumWindows((h, _) =>
                 {
-                    var sb = new StringBuilder(64);
-                    GetClassName(h, sb, 64);
-                    if (sb.ToString() == "WorkerW")
-                    {
-                        if (FindWindowEx(h, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero)
-                            defViewHost = h;
-                        else if (defViewHost != IntPtr.Zero && wallpaper == IntPtr.Zero)
-                            wallpaper = h;
-                    }
+                    if (FindWindowEx(h, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero)
+                        wallpaper = FindWindowEx(IntPtr.Zero, h, "WorkerW", null);
                     return wallpaper == IntPtr.Zero;
                 }, IntPtr.Zero);
 
                 var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
-                if (wallpaper == IntPtr.Zero || SetParent(hwnd, wallpaper) == IntPtr.Zero)
+                if (wallpaper == IntPtr.Zero)
+                {
+                    TxtStatus.Text = "未找到桌面壁纸层，保持悬浮模式";
+                    return;
+                }
+
+                SetParent(hwnd, wallpaper);
+                if (GetParent(hwnd) != wallpaper)
                 {
                     TxtStatus.Text = "嵌入桌面失败，保持悬浮模式";
                     return;
