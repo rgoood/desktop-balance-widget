@@ -63,6 +63,11 @@ namespace DesktopWidget
         [DllImport("user32.dll")]
         private static extern IntPtr GetParent(IntPtr hWnd);
 
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+        private const uint SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010;
+
         private const uint WM_SPAWN_WORKERW = 0x052C;
 
         public MainWindow()
@@ -375,8 +380,8 @@ namespace DesktopWidget
                 var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
                 if (wallpaper == IntPtr.Zero)
                 {
-                    TxtStatus.Text = "未找到桌面壁纸层，保持悬浮模式";
-                    return;
+                    // Win11 25H2 等新结构：WorkerW 都在 Progman 之上，找不到壁纸层时直接挂到 Progman
+                    wallpaper = progman;
                 }
 
                 SetParent(hwnd, wallpaper);
@@ -384,6 +389,14 @@ namespace DesktopWidget
                 {
                     TxtStatus.Text = "嵌入桌面失败，保持悬浮模式";
                     return;
+                }
+
+                if (wallpaper == progman)
+                {
+                    // 放到桌面图标层(SHELLDLL_DefView)之下，避免盖住图标
+                    var defview = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
+                    if (defview != IntPtr.Zero)
+                        SetWindowPos(hwnd, defview, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                 }
 
                 _embedded = true;
