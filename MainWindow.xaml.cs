@@ -66,7 +66,7 @@ namespace DesktopWidget
         [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
-        private const uint SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010;
+        private const uint SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010, SWP_SHOWWINDOW = 0x0040;
 
         private const uint WM_SPAWN_WORKERW = 0x052C;
 
@@ -86,7 +86,8 @@ namespace DesktopWidget
 
             Loaded += (_, _) =>
             {
-                if (_config.EmbedDesktop) EmbedInDesktop();
+                if (_config.EmbedDesktop)
+                    Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(EmbedInDesktop));
             };
 
             _ = RefreshAllAsync();
@@ -150,6 +151,17 @@ namespace DesktopWidget
                 Visible = true,
             };
             var menu = new System.Windows.Forms.ContextMenuStrip();
+            var autostart = new System.Windows.Forms.ToolStripMenuItem("开机自启")
+            {
+                Checked = IsAutoStartEnabled(),
+            };
+            autostart.Click += (_, _) =>
+            {
+                SetAutoStart(!IsAutoStartEnabled());
+                autostart.Checked = IsAutoStartEnabled();
+            };
+            menu.Items.Add(autostart);
+            menu.Items.Add(new System.Windows.Forms.ToolStripSeparator());
             menu.Items.Add("显示面板", null, (_, _) => ShowPanel());
             menu.Items.Add("立即刷新", null, (_, _) => Dispatcher.InvokeAsync(async () => await RefreshAllAsync()));
             menu.Items.Add("退出", null, (_, _) => ExitApp());
@@ -161,7 +173,8 @@ namespace DesktopWidget
         {
             Show();
             WindowState = WindowState.Normal;
-            Activate();
+            if (_embedded) PositionWindow();
+            try { Activate(); } catch { }
         }
 
         private void ExitApp()
@@ -358,6 +371,25 @@ namespace DesktopWidget
             _ = RefreshAllAsync();
         }
 
+        // ---------- 开机自启 ----------
+        private static string RunKeyPath => @"Software\Microsoft\Windows\CurrentVersion\Run";
+        private const string RunKeyName = "DesktopWidget";
+
+        private static bool IsAutoStartEnabled()
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKeyPath);
+            return key?.GetValue(RunKeyName) != null;
+        }
+
+        private static void SetAutoStart(bool enable)
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(RunKeyPath);
+            if (enable)
+                key.SetValue(RunKeyName, $"\"{Environment.ProcessPath}\"");
+            else
+                key.DeleteValue(RunKeyName, false);
+        }
+
         // ---------- 嵌入桌面 ----------
         private void EmbedInDesktop()
         {
@@ -396,11 +428,14 @@ namespace DesktopWidget
                     // 放到桌面图标层(SHELLDLL_DefView)之下，避免盖住图标
                     var defview = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
                     if (defview != IntPtr.Zero)
-                        SetWindowPos(hwnd, defview, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                        SetWindowPos(hwnd, defview, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
                 }
 
                 _embedded = true;
                 Topmost = false;
+                Show();
+                WindowState = WindowState.Normal;
                 PositionWindow();
                 UpdateEmbedButton();
             }
