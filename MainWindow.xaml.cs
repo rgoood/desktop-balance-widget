@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Runtime.InteropServices;
@@ -14,8 +15,14 @@ namespace DesktopWidget
         [JsonPropertyName("openrouter_api_key")]
         public string OpenRouterApiKey { get; set; } = "";
 
-        [JsonPropertyName("airport_subscription_url")]
-        public string AirportSubscriptionUrl { get; set; } = "";
+        [JsonPropertyName("airport_api_url")]
+        public string AirportApiUrl { get; set; } = "";
+
+        [JsonPropertyName("airport_username")]
+        public string AirportUsername { get; set; } = "";
+
+        [JsonPropertyName("airport_password")]
+        public string AirportPassword { get; set; } = "";
 
         [JsonPropertyName("refresh_interval_hours")]
         public double RefreshIntervalHours { get; set; } = 2.0;
@@ -39,36 +46,32 @@ namespace DesktopWidget
         private System.Windows.Forms.NotifyIcon? _trayIcon;
         private readonly DispatcherTimer _clock = new() { Interval = TimeSpan.FromSeconds(30) };
 
-        // ---------- Win32：嵌入桌面 ----------
+        // ---------- Win32：伪桌面模式（窗口沉底） ----------
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr FindWindow(string cls, string? title);
 
         [DllImport("user32.dll")]
-        private static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+        private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
 
-        [DllImport("user32.dll", SetLastError = true)]
-        private static extern IntPtr SetParent(IntPtr child, IntPtr parent);
+        [DllImport("user32.dll", EntryPoint = "GetWindowLong")]
+        private static extern int GetWindowLong32(IntPtr hWnd, int nIndex);
 
-        [DllImport("user32.dll")]
-        private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
-
-        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern int GetClassName(IntPtr hWnd, StringBuilder sb, int maxCount);
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string? cls, string? title);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetParent(IntPtr hWnd);
+        [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
+        private static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);
 
         [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
 
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
+        private const uint GW_HWNDPREV = 3; // Z 序中位于指定窗口上方的窗口
         private const uint SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010, SWP_SHOWWINDOW = 0x0040;
 
-        private const uint WM_SPAWN_WORKERW = 0x052C;
+        private static int GetWindowLong(IntPtr h, int i) => GetWindowLong32(h, i);
+        private static int SetWindowLong(IntPtr h, int i, int v) => SetWindowLong32(h, i, v);
+
+        private DispatcherTimer? _pinTimer;
+        private IntPtr _progman;
 
         public MainWindow()
         {
@@ -79,7 +82,12 @@ namespace DesktopWidget
             InitTrayIcon();
 
             PositionWindow();
-            StateChanged += (_, _) => { if (WindowState == WindowState.Minimized) Hide(); };
+            StateChanged += (_, _) =>
+            {
+                if (WindowState != WindowState.Minimized) return;
+                if (_embedded) { WindowState = WindowState.Normal; PinAboveDesktop(); }
+                else Hide();
+            };
 
             _clock.Tick += async (_, _) => await OnTickAsync();
             _clock.Start();
@@ -194,19 +202,45 @@ namespace DesktopWidget
         private async Task RefreshAllAsync()
         {
             TxtStatus.Text = "正在刷新...";
-            var t0 = Task.Run(() => QueryOpenRouterBalanceAsync());
-            var t1 = Task.Run(() => QueryAirportTrafficAsync());
-            await Task.WhenAll(t0, t1);
+            var bal = await Task.Run(() => QueryOpenRouterBalanceAsync());
+            SetBalanceUi(bal);
 
-            SetBalanceUi(t0.Result);
-            SetTrafficUi(t1.Result);
-            if (t0.Result.Ok && t1.Result.Ok)
-                TxtStatus.Text = $"更新于 {DateTime.Now:HH:mm:ss}";
+            // 机场流量：已配置 API 则同时刷新（猫猫云后端 API，轻量可定时）
+            var traffic = await Task.Run(() => QueryAirportTrafficAsync());
+            SetTrafficUi(traffic);
+
+            var ok = bal.Ok && traffic.Ok;
+            TxtStatus.Text = ok
+                ? $"刷新于 {DateTime.Now:HH:mm:ss}"
+                : (bal.Ok ? $"{Truncate(traffic.Detail, 46)}" : Truncate(bal.Detail, 46));
 
             var interval = TimeSpan.FromHours(Math.Max(0.1, _config.RefreshIntervalHours));
             if (interval.TotalMinutes < 1) interval = TimeSpan.FromMinutes(1);
             _nextRefresh = DateTime.Now.Add(interval);
             TxtNext.Text = $"下次更新 {_nextRefresh:HH:mm}";
+        }
+
+        // ---------- 机场流量：手动获取 ----------
+        private bool _trafficBusy;
+
+        public async Task RefreshTrafficAsync()
+        {
+            if (_trafficBusy) return;
+            _trafficBusy = true;
+            BtnTraffic.IsEnabled = false;
+            try
+            {
+                TxtStatus.Text = "正在获取流量...";
+                var r = await Task.Run(() => QueryAirportTrafficAsync());
+                SetTrafficUi(r);
+                if (r.Ok)
+                    TxtStatus.Text = $"流量更新于 {DateTime.Now:HH:mm:ss}";
+            }
+            finally
+            {
+                _trafficBusy = false;
+                BtnTraffic.IsEnabled = true;
+            }
         }
 
         // ---------- OpenRouter ----------
@@ -252,44 +286,45 @@ namespace DesktopWidget
             if (!r.Ok) TxtStatus.Text = Truncate(r.Detail, 46);
         }
 
-        // ---------- 机场流量（订阅 subscription-userinfo 头）----------
+        // ---------- 机场流量（猫猫云 V2Board 后端 API）----------
+        // 登录: POST {base}/api/v1/passport/auth/login  body {email,password} -> data.auth.token
+        // 流量: GET  {base}/api/v1/user/getSubscribe   Header Authorization: <token>
+        //       返回 data.u(上传) / data.d(下载) / data.transfer_enable(总量) / data.expired_at(到期unix秒)
         private record TrafficResult(bool Ok, string Text, long? Used, long? Total, DateTimeOffset? Expire, string Detail);
 
         private async Task<TrafficResult> QueryAirportTrafficAsync()
         {
-            if (string.IsNullOrWhiteSpace(_config.AirportSubscriptionUrl))
-                return new TrafficResult(false, "--", null, null, null, "未配置订阅链接，请点齿轮设置");
+            if (string.IsNullOrWhiteSpace(_config.AirportApiUrl))
+                return new TrafficResult(false, "--", null, null, null, "未配置机场 API 地址，请点齿轮设置");
+
+            if (string.IsNullOrWhiteSpace(_config.AirportUsername) || string.IsNullOrWhiteSpace(_config.AirportPassword))
+                return new TrafficResult(false, "--", null, null, null, "未配置机场账号/密码，请点齿轮设置");
 
             try
             {
-                using var req = new HttpRequestMessage(HttpMethod.Get, _config.AirportSubscriptionUrl.Trim());
-                req.Headers.UserAgent.ParseAdd("clash-verge/v1.6.0");
+                var token = await AirportLoginAsync();
+                if (token == null)
+                    return new TrafficResult(false, "错误", null, null, null, "机场登录失败，请检查账号密码或网络");
+
+                using var req = new HttpRequestMessage(HttpMethod.Get, $"{_config.AirportApiUrl.TrimEnd('/')}/api/v1/user/getSubscribe");
+                req.Headers.TryAddWithoutValidation("Authorization", token);
                 using var resp = await Http.SendAsync(req);
                 var body = await resp.Content.ReadAsStringAsync();
 
                 if (!resp.IsSuccessStatusCode)
-                    return new TrafficResult(false, "错误", null, null, null, $"订阅请求失败 HTTP {(int)resp.StatusCode}：{Truncate(body, 120)}");
+                    return new TrafficResult(false, "错误", null, null, null, $"流量请求失败 HTTP {(int)resp.StatusCode}：{Truncate(body, 120)}");
 
-                if (!resp.Headers.TryGetValues("subscription-userinfo", out var values))
-                    return new TrafficResult(false, "--", null, null, null,
-                        "响应中没有 subscription-userinfo 头。若机场提示“订阅开关已关闭”，请先到官网临时打开开关再刷新。" +
-                        Truncate(body, 80));
+                using var doc = JsonDocument.Parse(body);
+                var root = doc.RootElement;
+                var status = root.TryGetProperty("status", out var st) ? st.GetString() : "";
+                if (status != "success")
+                    return new TrafficResult(false, "错误", null, null, null, "机场返回异常：" + Truncate(body, 120));
 
-                var header = string.Join(";", values);
-                long upload = 0, download = 0, total = 0, expire = 0;
-                foreach (var part in header.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-                {
-                    var kv = part.Split('=', 2);
-                    if (kv.Length != 2) continue;
-                    if (!long.TryParse(kv[1].Trim(), out var v)) continue;
-                    switch (kv[0].Trim().ToLowerInvariant())
-                    {
-                        case "upload": upload = v; break;
-                        case "download": download = v; break;
-                        case "total": total = v; break;
-                        case "expire": expire = v; break;
-                    }
-                }
+                var data = root.GetProperty("data");
+                long upload = data.TryGetProperty("u", out var up) ? up.GetInt64() : 0;
+                long download = data.TryGetProperty("d", out var dn) ? dn.GetInt64() : 0;
+                long total = data.TryGetProperty("transfer_enable", out var te) ? te.GetInt64() : 0;
+                long expire = data.TryGetProperty("expired_at", out var ex) ? ex.GetInt64() : 0;
 
                 var used = upload + download;
                 DateTimeOffset? expireDate = expire > 0 ? DateTimeOffset.FromUnixTimeSeconds(expire) : null;
@@ -297,8 +332,30 @@ namespace DesktopWidget
             }
             catch (Exception ex)
             {
-                return new TrafficResult(false, "--", null, null, null, "订阅请求异常：" + Truncate(ex.Message, 120));
+                return new TrafficResult(false, "--", null, null, null, "流量查询异常：" + Truncate(ex.Message, 120));
             }
+        }
+
+        // 返回 JWT（data.auth_data，接口认证用的 Authorization 头）
+        private async Task<string?> AirportLoginAsync()
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_config.AirportApiUrl.TrimEnd('/')}/api/v1/passport/auth/login");
+            req.Content = new StringContent(
+                JsonSerializer.Serialize(new { email = _config.AirportUsername.Trim(), password = _config.AirportPassword }),
+                Encoding.UTF8, "application/json");
+            using var resp = await Http.SendAsync(req);
+            var body = await resp.Content.ReadAsStringAsync();
+            if (!resp.IsSuccessStatusCode) return null;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("data", out var data) && data.TryGetProperty("auth_data", out var jwt))
+                    return jwt.GetString();
+                return null;
+            }
+            catch { return null; }
         }
 
         private void SetTrafficUi(TrafficResult r)
@@ -352,6 +409,8 @@ namespace DesktopWidget
 
         private void Refresh_Click(object sender, RoutedEventArgs e) => _ = RefreshAllAsync();
 
+        private void Traffic_Click(object sender, RoutedEventArgs e) => _ = RefreshTrafficAsync();
+
         private void Pin_Click(object sender, RoutedEventArgs e)
         {
             _topmost = !_topmost;
@@ -390,53 +449,33 @@ namespace DesktopWidget
                 key.DeleteValue(RunKeyName, false);
         }
 
-        // ---------- 嵌入桌面 ----------
+        // ---------- 伪桌面模式：窗口始终沉底，位于所有程序窗口之下、桌面之上 ----------
         private void EmbedInDesktop()
         {
             try
             {
-                var progman = FindWindow("Progman", null);
-                SendMessageTimeout(progman, WM_SPAWN_WORKERW, IntPtr.Zero, IntPtr.Zero, 0x0002, 1000, out _);
-
-                // 兼容两种桌面结构：
-                // 1) SHELLDLL_DefView 在某个 WorkerW 下 → 目标是它后面的下一个 WorkerW
-                // 2) SHELLDLL_DefView 直接在 Progman 下 → 目标是 Z 序中 Progman 之后的第一个 WorkerW
-                IntPtr wallpaper = IntPtr.Zero;
-                EnumWindows((h, _) =>
+                _progman = FindWindow("Progman", null);
+                if (_progman == IntPtr.Zero)
                 {
-                    if (FindWindowEx(h, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero)
-                        wallpaper = FindWindowEx(IntPtr.Zero, h, "WorkerW", null);
-                    return wallpaper == IntPtr.Zero;
-                }, IntPtr.Zero);
-
-                var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
-                if (wallpaper == IntPtr.Zero)
-                {
-                    // Win11 25H2 等新结构：WorkerW 都在 Progman 之上，找不到壁纸层时直接挂到 Progman
-                    wallpaper = progman;
-                }
-
-                SetParent(hwnd, wallpaper);
-                if (GetParent(hwnd) != wallpaper)
-                {
-                    TxtStatus.Text = "嵌入桌面失败，保持悬浮模式";
+                    TxtStatus.Text = "未找到桌面窗口，保持悬浮模式";
                     return;
                 }
 
-                if (wallpaper == progman)
-                {
-                    // 放到桌面图标层(SHELLDLL_DefView)之下，避免盖住图标
-                    var defview = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
-                    if (defview != IntPtr.Zero)
-                        SetWindowPos(hwnd, defview, 0, 0, 0, 0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-                }
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+                // WS_EX_NOACTIVATE：点击面板时不抢焦点、不会跳到其他窗口前面
+                SetWindowLong(hwnd, GWL_EXSTYLE, GetWindowLong(hwnd, GWL_EXSTYLE) | WS_EX_NOACTIVATE);
 
                 _embedded = true;
                 Topmost = false;
                 Show();
                 WindowState = WindowState.Normal;
                 PositionWindow();
+                PinAboveDesktop();
+
+                _pinTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+                _pinTimer.Tick += (_, _) => PinAboveDesktop();
+                _pinTimer.Start();
+                Deactivated += Window_Deactivated;
                 UpdateEmbedButton();
             }
             catch
@@ -445,11 +484,36 @@ namespace DesktopWidget
             }
         }
 
+        private void Window_Deactivated(object? sender, EventArgs e) => PinAboveDesktop();
+
+        private void PinAboveDesktop()
+        {
+            try
+            {
+                if (!_embedded) return;
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+                if (_progman == IntPtr.Zero)
+                    _progman = FindWindow("Progman", null);
+                if (_progman == IntPtr.Zero) return;
+
+                // 找到 Z 序中紧贴桌面上方的那个窗口，把自己插到它下面（即紧贴桌面之上）
+                var aboveDesktop = GetWindow(_progman, GW_HWNDPREV);
+                if (aboveDesktop == hwnd) return; // 已在正确位置
+                if (aboveDesktop == IntPtr.Zero) return;
+
+                SetWindowPos(hwnd, aboveDesktop, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            }
+            catch { }
+        }
+
         private void DetachFromDesktop()
         {
-            var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
-            SetParent(hwnd, IntPtr.Zero);
+            _pinTimer?.Stop();
+            _pinTimer = null;
+            Deactivated -= Window_Deactivated;
             _embedded = false;
+            var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            SetWindowLong(hwnd, GWL_EXSTYLE, GetWindowLong(hwnd, GWL_EXSTYLE) & ~WS_EX_NOACTIVATE);
             Topmost = _topmost;
             PositionWindow();
             UpdateEmbedButton();

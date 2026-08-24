@@ -11,7 +11,9 @@ namespace DesktopWidget
             InitializeComponent();
             _main = main;
             TxtKey.Text = config.OpenRouterApiKey;
-            TxtSubUrl.Text = config.AirportSubscriptionUrl;
+            TxtApiUrl.Text = config.AirportApiUrl;
+            TxtAirportUser.Text = config.AirportUsername;
+            TxtAirportPass.Text = config.AirportPassword;
             TxtInterval.Text = config.RefreshIntervalHours.ToString("0.#");
         }
 
@@ -20,7 +22,9 @@ namespace DesktopWidget
             var cfg = new WidgetConfig
             {
                 OpenRouterApiKey = TxtKey.Text.Trim(),
-                AirportSubscriptionUrl = TxtSubUrl.Text.Trim(),
+                AirportApiUrl = TxtApiUrl.Text.Trim(),
+                AirportUsername = TxtAirportUser.Text.Trim(),
+                AirportPassword = TxtAirportPass.Text,
                 RefreshIntervalHours = double.TryParse(TxtInterval.Text, out var h) && h > 0 ? h : 2.0,
                 EmbedDesktop = _main.CurrentConfig.EmbedDesktop,
             };

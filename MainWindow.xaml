@@ -28,7 +28,7 @@
                     <TextBlock Text="监控面板" FontSize="13" FontWeight="Bold" Foreground="#EEEEEE" VerticalAlignment="Center"/>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                         <Button x:Name="BtnRefresh" Content="&#xE72C;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource WidgetButton}"
-                                Width="26" Height="22" Click="Refresh_Click" ToolTip="立即刷新" Margin="0,0,4,0"/>
+                                Width="26" Height="22" Click="Refresh_Click" ToolTip="刷新余额" Margin="0,0,4,0"/>
                         <Button x:Name="BtnEmbed" Content="&#xE7F4;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource WidgetButton}"
                                 Width="26" Height="22" Click="Embed_Click" ToolTip="嵌入桌面（不遮挡窗口）" Margin="0,0,4,0"/>
                         <Button x:Name="BtnPin" Content="&#xE718;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource WidgetButton}"
@@ -50,7 +50,18 @@
 
                 <!-- 机场流量 -->
                 <StackPanel Grid.Row="3">
-                    <TextBlock Text="机场流量" FontSize="10" Foreground="#8899AA"/>
+                    <DockPanel>
+                        <TextBlock Text="机场流量" FontSize="10" Foreground="#8899AA" VerticalAlignment="Center"/>
+                        <Button x:Name="BtnTraffic" FontSize="10"
+                                Foreground="#6CC3FF" Background="Transparent" BorderThickness="0"
+                                HorizontalAlignment="Right" Click="Traffic_Click" ToolTip="手动获取最新流量（通过机场后台 API）"
+                                Padding="4,1" Cursor="Hand">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE895;" FontFamily="Segoe MDL2 Assets" FontSize="10" VerticalAlignment="Center"/>
+                                <TextBlock Text="获取流量" Margin="4,0,0,0" VerticalAlignment="Center"/>
+                            </StackPanel>
+                        </Button>
+                    </DockPanel>
                     <TextBlock x:Name="TxtTraffic" Text="--" FontSize="12" FontWeight="Bold" Foreground="#6CC3FF" Margin="0,2,0,0"
                                TextTrimming="CharacterEllipsis"/>
                     <ProgressBar x:Name="BarTraffic" Height="4" Minimum="0" Maximum="100" Margin="0,4,0,0"
