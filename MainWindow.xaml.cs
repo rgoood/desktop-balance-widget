@@ -286,11 +286,42 @@ namespace DesktopWidget
             if (!r.Ok) TxtStatus.Text = Truncate(r.Detail, 46);
         }
 
-        // ---------- 机场流量（猫猫云 V2Board 后端 API）----------
-        // 登录: POST {base}/api/v1/passport/auth/login  body {email,password} -> data.auth.token
-        // 流量: GET  {base}/api/v1/user/getSubscribe   Header Authorization: <token>
+        // ---------- 机场流量（猫猫云 V2Board / XBoard 后端 API）----------
+        // 登录: POST {base}/api/v1/passport/auth/login  body {email,password} -> data.auth_data(业务认证头,已含Bearer前缀)
+        // 流量: GET  {base}/api/v1/user/getSubscribe   Header Authorization: <auth_data>
         //       返回 data.u(上传) / data.d(下载) / data.transfer_enable(总量) / data.expired_at(到期unix秒)
         private record TrafficResult(bool Ok, string Text, long? Used, long? Total, DateTimeOffset? Expire, string Detail);
+        private record LoginResult(string? Token, string? Error);
+
+        private static long GetInt64Safe(JsonElement obj, string prop)
+        {
+            if (!obj.TryGetProperty(prop, out var e)) return 0;
+            switch (e.ValueKind)
+            {
+                case JsonValueKind.Number:
+                    return e.TryGetInt64(out var n) ? n : (long)e.GetDouble();
+                case JsonValueKind.String:
+                    return long.TryParse(e.GetString(), out var s) ? s : 0;
+                default:
+                    return 0; // null / 其它类型
+            }
+        }
+
+        // 提取云端返回的 message（某些面板用 \uXXXX 转义，JsonDocument 会自动解码）
+        private static string? TryExtractMessage(string body)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String)
+                {
+                    var s = m.GetString();
+                    if (!string.IsNullOrWhiteSpace(s)) return s;
+                }
+            }
+            catch { }
+            return null;
+        }
 
         private async Task<TrafficResult> QueryAirportTrafficAsync()
         {
@@ -302,31 +333,33 @@ namespace DesktopWidget
 
             try
             {
-                var token = await AirportLoginAsync();
-                if (token == null)
-                    return new TrafficResult(false, "错误", null, null, null, "机场登录失败，请检查账号密码或网络");
+                var login = await AirportLoginAsync();
+                if (login.Token == null)
+                    return new TrafficResult(false, "错误", null, null, null, "机场登录失败：" + (login.Error ?? "请检查账号密码或网络"));
 
                 using var req = new HttpRequestMessage(HttpMethod.Get, $"{_config.AirportApiUrl.TrimEnd('/')}/api/v1/user/getSubscribe");
-                req.Headers.TryAddWithoutValidation("Authorization", token);
+                req.Headers.TryAddWithoutValidation("Authorization", login.Token);
+                req.Headers.Accept.ParseAdd("application/json");
                 using var resp = await Http.SendAsync(req);
                 var body = await resp.Content.ReadAsStringAsync();
 
                 if (!resp.IsSuccessStatusCode)
-                    return new TrafficResult(false, "错误", null, null, null, $"流量请求失败 HTTP {(int)resp.StatusCode}：{Truncate(body, 120)}");
+                    return new TrafficResult(false, "错误", null, null, null, $"流量请求失败 HTTP {(int)resp.StatusCode}：{TryExtractMessage(body) ?? Truncate(body, 120)}");
 
                 using var doc = JsonDocument.Parse(body);
                 var root = doc.RootElement;
                 var status = root.TryGetProperty("status", out var st) ? st.GetString() : "";
                 if (status != "success")
-                    return new TrafficResult(false, "错误", null, null, null, "机场返回异常：" + Truncate(body, 120));
+                    return new TrafficResult(false, "错误", null, null, null, "机场返回异常：" + (TryExtractMessage(body) ?? Truncate(body, 120)));
 
                 var data = root.GetProperty("data");
-                long upload = data.TryGetProperty("u", out var up) ? up.GetInt64() : 0;
-                long download = data.TryGetProperty("d", out var dn) ? dn.GetInt64() : 0;
-                long total = data.TryGetProperty("transfer_enable", out var te) ? te.GetInt64() : 0;
-                long expire = data.TryGetProperty("expired_at", out var ex) ? ex.GetInt64() : 0;
+                long upload = GetInt64Safe(data, "u");
+                long download = GetInt64Safe(data, "d");
+                long used = upload + download;
+                if (used == 0) used = GetInt64Safe(data, "used"); // 部分面板直接返回 used
+                long total = GetInt64Safe(data, "transfer_enable");
+                long expire = GetInt64Safe(data, "expired_at");   // null/字符串也能安全解析
 
-                var used = upload + download;
                 DateTimeOffset? expireDate = expire > 0 ? DateTimeOffset.FromUnixTimeSeconds(expire) : null;
                 return new TrafficResult(true, "", used, total, expireDate, "");
             }
@@ -336,26 +369,36 @@ namespace DesktopWidget
             }
         }
 
-        // 返回 JWT（data.auth_data，接口认证用的 Authorization 头）
-        private async Task<string?> AirportLoginAsync()
+        // 返回业务认证头（data.auth_data；新面板已含 "Bearer " 前缀，旧版 V2Board 为裸 token，这里统一补全）
+        private async Task<LoginResult> AirportLoginAsync()
         {
             using var req = new HttpRequestMessage(HttpMethod.Post, $"{_config.AirportApiUrl.TrimEnd('/')}/api/v1/passport/auth/login");
+            req.Headers.Accept.ParseAdd("application/json");
             req.Content = new StringContent(
                 JsonSerializer.Serialize(new { email = _config.AirportUsername.Trim(), password = _config.AirportPassword }),
                 Encoding.UTF8, "application/json");
             using var resp = await Http.SendAsync(req);
             var body = await resp.Content.ReadAsStringAsync();
-            if (!resp.IsSuccessStatusCode) return null;
 
-            try
+            if (resp.IsSuccessStatusCode)
             {
-                using var doc = JsonDocument.Parse(body);
-                var root = doc.RootElement;
-                if (root.TryGetProperty("data", out var data) && data.TryGetProperty("auth_data", out var jwt))
-                    return jwt.GetString();
-                return null;
+                try
+                {
+                    using var doc = JsonDocument.Parse(body);
+                    if (doc.RootElement.TryGetProperty("data", out var data) && data.TryGetProperty("auth_data", out var jwt))
+                    {
+                        var raw = jwt.GetString();
+                        var token = (!string.IsNullOrEmpty(raw) && raw.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                            ? raw
+                            : "Bearer " + raw;
+                        return new LoginResult(token, null);
+                    }
+                }
+                catch { }
+                return new LoginResult(null, "登录响应结构异常：" + Truncate(body, 120));
             }
-            catch { return null; }
+
+            return new LoginResult(null, TryExtractMessage(body) ?? $"HTTP {(int)resp.StatusCode}：{Truncate(body, 120)}");
         }
 
         private void SetTrafficUi(TrafficResult r)
