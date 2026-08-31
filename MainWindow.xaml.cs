@@ -340,6 +340,9 @@ namespace DesktopWidget
                 using var req = new HttpRequestMessage(HttpMethod.Get, $"{_config.AirportApiUrl.TrimEnd('/')}/api/v1/user/getSubscribe");
                 req.Headers.TryAddWithoutValidation("Authorization", login.Token);
                 req.Headers.Accept.ParseAdd("application/json");
+                req.Headers.TryAddWithoutValidation("User-Agent", AirportUa);
+                req.Headers.TryAddWithoutValidation("Referer", _config.AirportApiUrl.TrimEnd('/') + "/");
+                req.Headers.TryAddWithoutValidation("Origin", _config.AirportApiUrl.TrimEnd('/'));
                 using var resp = await Http.SendAsync(req);
                 var body = await resp.Content.ReadAsStringAsync();
 
@@ -369,11 +372,18 @@ namespace DesktopWidget
             }
         }
 
-        // 返回业务认证头（data.auth_data；新面板已含 "Bearer " 前缀，旧版 V2Board 为裸 token，这里统一补全）
+        // 机场 WAF 会拦截缺少浏览器头/伪装客户端的请求，这里统一带上浏览器指纹头
+        const string AirportUa =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+        // 返回业务认证头（data.auth_data；猫猫云等面板直接使用裸 token 作为 Authorization 值，无需 Bearer 前缀）
         private async Task<LoginResult> AirportLoginAsync()
         {
             using var req = new HttpRequestMessage(HttpMethod.Post, $"{_config.AirportApiUrl.TrimEnd('/')}/api/v1/passport/auth/login");
             req.Headers.Accept.ParseAdd("application/json");
+            req.Headers.TryAddWithoutValidation("User-Agent", AirportUa);
+            req.Headers.TryAddWithoutValidation("Referer", _config.AirportApiUrl.TrimEnd('/') + "/");
+            req.Headers.TryAddWithoutValidation("Origin", _config.AirportApiUrl.TrimEnd('/'));
             req.Content = new StringContent(
                 JsonSerializer.Serialize(new { email = _config.AirportUsername.Trim(), password = _config.AirportPassword }),
                 Encoding.UTF8, "application/json");
@@ -387,10 +397,7 @@ namespace DesktopWidget
                     using var doc = JsonDocument.Parse(body);
                     if (doc.RootElement.TryGetProperty("data", out var data) && data.TryGetProperty("auth_data", out var jwt))
                     {
-                        var raw = jwt.GetString();
-                        var token = (!string.IsNullOrEmpty(raw) && raw.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-                            ? raw
-                            : "Bearer " + raw;
+                        var token = jwt.GetString();
                         return new LoginResult(token, null);
                     }
                 }
@@ -398,7 +405,11 @@ namespace DesktopWidget
                 return new LoginResult(null, "登录响应结构异常：" + Truncate(body, 120));
             }
 
-            return new LoginResult(null, TryExtractMessage(body) ?? $"HTTP {(int)resp.StatusCode}：{Truncate(body, 120)}");
+            // WAF 拦截会返回非 JSON 的 403 页面，尝试还原出可读提示
+            var msg = TryExtractMessage(body);
+            if (msg == null && !body.TrimStart().StartsWith("{"))
+                msg = $"HTTP {(int)resp.StatusCode}（可能被机场 WAF/防火墙拦截，请检查网络或稍后重试）";
+            return new LoginResult(null, msg ?? $"HTTP {(int)resp.StatusCode}：{Truncate(body, 120)}");
         }
 
         private void SetTrafficUi(TrafficResult r)
