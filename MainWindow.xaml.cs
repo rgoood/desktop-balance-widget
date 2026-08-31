@@ -59,13 +59,18 @@ namespace DesktopWidget
         [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
         private static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+
         [DllImport("user32.dll")]
-        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+        private static extern IntPtr GetParent(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
         private const int GWL_EXSTYLE = -20;
         private const int WS_EX_NOACTIVATE = 0x08000000;
-        private const uint GW_HWNDPREV = 3; // Z 序中位于指定窗口上方的窗口
-        private const uint SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010, SWP_SHOWWINDOW = 0x0040;
+        private const int SW_SHOW = 5;
 
         private static int GetWindowLong(IntPtr h, int i) => GetWindowLong32(h, i);
         private static int SetWindowLong(IntPtr h, int i, int v) => SetWindowLong32(h, i, v);
@@ -521,11 +526,16 @@ namespace DesktopWidget
 
                 _embedded = true;
                 Topmost = false;
+
+                // 把窗口设为 Progman（桌面）的子窗口：永远显示在桌面图标层，
+                // 位于所有应用窗口之下，像时钟一样常驻且不遮挡任何窗口。
+                SetParent(hwnd, _progman);
                 Show();
                 WindowState = WindowState.Normal;
                 PositionWindow();
-                PinAboveDesktop();
+                ShowWindow(hwnd, SW_SHOW);
 
+                // 定时把窗口重新对齐到桌面，防止被系统窗口/刷新挤走
                 _pinTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
                 _pinTimer.Tick += (_, _) => PinAboveDesktop();
                 _pinTimer.Start();
@@ -550,12 +560,11 @@ namespace DesktopWidget
                     _progman = FindWindow("Progman", null);
                 if (_progman == IntPtr.Zero) return;
 
-                // 找到 Z 序中紧贴桌面上方的那个窗口，把自己插到它下面（即紧贴桌面之上）
-                var aboveDesktop = GetWindow(_progman, GW_HWNDPREV);
-                if (aboveDesktop == hwnd) return; // 已在正确位置
-                if (aboveDesktop == IntPtr.Zero) return;
-
-                SetWindowPos(hwnd, aboveDesktop, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                // 重新挂到桌面父窗口，并确保可见、位置正确
+                if (GetParent(hwnd) != _progman)
+                    SetParent(hwnd, _progman);
+                ShowWindow(hwnd, SW_SHOW);
+                PositionWindow();
             }
             catch { }
         }
