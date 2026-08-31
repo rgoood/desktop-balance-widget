@@ -29,8 +29,6 @@
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                         <Button x:Name="BtnRefresh" Content="&#xE72C;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource WidgetButton}"
                                 Width="26" Height="22" Click="Refresh_Click" ToolTip="刷新余额" Margin="0,0,4,0"/>
-                        <Button x:Name="BtnEmbed" Content="&#xE7F4;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource WidgetButton}"
-                                Width="26" Height="22" Click="Embed_Click" ToolTip="嵌入桌面（不遮挡窗口）" Margin="0,0,4,0"/>
                         <Button x:Name="BtnPin" Content="&#xE718;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource WidgetButton}"
                                 Width="26" Height="22" Click="Pin_Click" ToolTip="取消置顶/置顶" Margin="0,0,4,0"/>
                         <Button x:Name="BtnSettings" Content="&#xE713;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource WidgetButton}"
