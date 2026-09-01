@@ -8,7 +8,7 @@
         WindowStyle="None"
         AllowsTransparency="True"
         Background="Transparent"
-        Topmost="True"
+        Topmost="False"
         ShowInTaskbar="False"
         WindowStartupLocation="Manual"
         Left="40" Top="40">
@@ -29,8 +29,8 @@
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                         <Button x:Name="BtnRefresh" Content="&#xE72C;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource WidgetButton}"
                                 Width="26" Height="22" Click="Refresh_Click" ToolTip="刷新余额" Margin="0,0,4,0"/>
-                        <Button x:Name="BtnPin" Content="&#xE718;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource WidgetButton}"
-                                Width="26" Height="22" Click="Pin_Click" ToolTip="取消置顶/置顶" Margin="0,0,4,0"/>
+                        <Button x:Name="BtnPin" Content="&#xE7F4;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource WidgetButton}"
+                                Width="26" Height="22" Click="Pin_Click" ToolTip="仅桌面显示（桌面模式）" Margin="0,0,4,0"/>
                         <Button x:Name="BtnSettings" Content="&#xE713;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource WidgetButton}"
                                 Width="26" Height="22" Click="Settings_Click" ToolTip="设置（API Key / 订阅链接）" Margin="0,0,4,0"/>
                         <Button Content="&#xE8BB;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource WidgetButton}"

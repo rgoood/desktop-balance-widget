@@ -42,9 +42,31 @@ namespace DesktopWidget
 
         private WidgetConfig _config = new();
         private DateTime _nextRefresh = DateTime.Now;
-        private bool _topmost = true;
+        private bool _embedded;
         private System.Windows.Forms.NotifyIcon? _trayIcon;
         private readonly DispatcherTimer _clock = new() { Interval = TimeSpan.FromSeconds(30) };
+        private DispatcherTimer? _pinTimer;
+        private IntPtr _progman;
+
+        // ---------- Win32：让面板只显示在桌面层（Z 序压到桌面之上、普通窗口之下） ----------
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr FindWindow(string cls, string? title);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint flags);
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLong")]
+        private static extern int GetWindowLong32(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
+        private static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
+        private const uint SWP_NOMOVE = 0x0002, SWP_NOSIZE = 0x0001, SWP_NOACTIVATE = 0x0010, SWP_SHOWWINDOW = 0x0040;
+
+        private static int GetWindowLong(IntPtr h, int i) => GetWindowLong32(h, i);
+        private static int SetWindowLong(IntPtr h, int i, int v) => SetWindowLong32(h, i, v);
 
         public MainWindow()
         {
@@ -58,11 +80,18 @@ namespace DesktopWidget
             StateChanged += (_, _) =>
             {
                 if (WindowState != WindowState.Minimized) return;
-                WindowState = WindowState.Normal; // 置顶悬浮，最小化时还原为普通（不隐藏到托盘）
+                if (_embedded) { WindowState = WindowState.Normal; PinAboveDesktop(); }
+                else Hide();
             };
 
             _clock.Tick += async (_, _) => await OnTickAsync();
             _clock.Start();
+
+            Loaded += (_, _) =>
+            {
+                if (_config.EmbedDesktop)
+                    Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(EmbedInDesktop));
+            };
 
             _ = RefreshAllAsync();
         }
@@ -147,7 +176,7 @@ namespace DesktopWidget
         {
             Show();
             WindowState = WindowState.Normal;
-            Topmost = true;
+            if (_embedded) PinAboveDesktop();
             try { Activate(); } catch { }
         }
 
@@ -431,12 +460,83 @@ namespace DesktopWidget
 
         private void Traffic_Click(object sender, RoutedEventArgs e) => _ = RefreshTrafficAsync();
 
+        // ---------- 桌面模式：窗口只显示在桌面层（Z 序压到桌面之上、普通窗口之下） ----------
+        private void EmbedInDesktop()
+        {
+            try
+            {
+                _progman = FindWindow("Progman", null);
+                if (_progman == IntPtr.Zero)
+                {
+                    TxtStatus.Text = "未找到桌面窗口，保持悬浮模式";
+                    return;
+                }
+
+                _embedded = true;
+                Topmost = false;
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+                // 点击面板时不抢焦点
+                SetWindowLong(hwnd, GWL_EXSTYLE, GetWindowLong(hwnd, GWL_EXSTYLE) | WS_EX_NOACTIVATE);
+                Show();
+                WindowState = WindowState.Normal;
+                PositionWindow();
+                PinAboveDesktop();
+
+                // 持续压底，防止被新开的普通窗口盖上去（全屏窗口仍会盖住，这是桌面时钟的正常行为）
+                _pinTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+                _pinTimer.Tick += (_, _) => PinAboveDesktop();
+                _pinTimer.Start();
+                UpdateEmbedButton();
+            }
+            catch
+            {
+                TxtStatus.Text = "嵌入桌面失败，保持悬浮模式";
+            }
+        }
+
+        // 把窗口 Z 序插到桌面(Progman)之后：位于桌面之上、所有普通窗口之下
+        private void PinAboveDesktop()
+        {
+            try
+            {
+                if (!_embedded) return;
+                var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+                if (_progman == IntPtr.Zero)
+                    _progman = FindWindow("Progman", null);
+                if (_progman == IntPtr.Zero) return;
+
+                Topmost = false;
+                SetWindowPos(hwnd, _progman, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            }
+            catch { }
+        }
+
+        private void DetachFromDesktop()
+        {
+            _pinTimer?.Stop();
+            _pinTimer = null;
+            _embedded = false;
+            var hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
+            SetWindowLong(hwnd, GWL_EXSTYLE, GetWindowLong(hwnd, GWL_EXSTYLE) & ~WS_EX_NOACTIVATE);
+            Topmost = false; // 恢复为普通窗口（不再锁定在桌面层）
+            PositionWindow();
+            UpdateEmbedButton();
+        }
+
+        private void UpdateEmbedButton()
+        {
+            BtnPin.Content = _embedded ? "\uE8A9" : "\uE7F4";
+            BtnPin.ToolTip = _embedded ? "退出桌面模式（恢复普通悬浮）" : "仅桌面显示（桌面模式）";
+        }
+
         private void Pin_Click(object sender, RoutedEventArgs e)
         {
-            _topmost = !_topmost;
-            Topmost = _topmost;
-            BtnPin.Content = _topmost ? "\uE718" : "\uE77A";
-            BtnPin.ToolTip = _topmost ? "当前置顶，点击取消" : "当前不置顶，点击置顶";
+            // 标题栏按钮 = 切换「仅桌面显示」模式
+            _config.EmbedDesktop = !_embedded;
+            SaveConfig();
+            if (_embedded) DetachFromDesktop();
+            else EmbedInDesktop();
         }
 
         private void Minimize_Click(object sender, RoutedEventArgs e) => Hide();
